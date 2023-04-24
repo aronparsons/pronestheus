@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,7 +36,10 @@ type Thermostat struct {
 	AmbientTemp  float64
 	SetpointTemp float64
 	Humidity     float64
-	Status       string
+	Heating      string
+	Cooling      string
+	Fan          string
+	Eco          string
 }
 
 // Config provides the configuration necessary to create the Collector.
@@ -65,6 +69,9 @@ type Metrics struct {
 	setpointTemp *prometheus.Desc
 	humidity     *prometheus.Desc
 	heating      *prometheus.Desc
+	cooling      *prometheus.Desc
+	fan          *prometheus.Desc
+	eco          *prometheus.Desc
 }
 
 // New creates a Collector using the given Config.
@@ -106,10 +113,13 @@ func buildMetrics() *Metrics {
 	var nestLabels = []string{"id", "label"}
 	return &Metrics{
 		up:           prometheus.NewDesc(strings.Join([]string{"nest", "up"}, "_"), "Was talking to Nest API successful.", nil, nil),
-		ambientTemp:  prometheus.NewDesc(strings.Join([]string{"nest", "ambient", "temperature", "celsius"}, "_"), "Inside temperature.", nestLabels, nil),
-		setpointTemp: prometheus.NewDesc(strings.Join([]string{"nest", "setpoint", "temperature", "celsius"}, "_"), "Setpoint temperature.", nestLabels, nil),
+		ambientTemp:  prometheus.NewDesc(strings.Join([]string{"nest", "ambient", "temperature", "fahrenheit"}, "_"), "Inside temperature.", nestLabels, nil),
+		setpointTemp: prometheus.NewDesc(strings.Join([]string{"nest", "setpoint", "temperature", "fahrenheit"}, "_"), "Setpoint temperature.", nestLabels, nil),
 		humidity:     prometheus.NewDesc(strings.Join([]string{"nest", "humidity", "percent"}, "_"), "Inside humidity.", nestLabels, nil),
 		heating:      prometheus.NewDesc(strings.Join([]string{"nest", "heating"}, "_"), "Is thermostat heating.", nestLabels, nil),
+		cooling:      prometheus.NewDesc(strings.Join([]string{"nest", "cooling"}, "_"), "Is thermostat cooling.", nestLabels, nil),
+		fan:          prometheus.NewDesc(strings.Join([]string{"nest", "fan"}, "_"), "Is thermostat fan running.", nestLabels, nil),
+		eco:          prometheus.NewDesc(strings.Join([]string{"nest", "eco"}, "_"), "Is thermostat in Eco.", nestLabels, nil),
 	}
 }
 
@@ -120,6 +130,9 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.metrics.setpointTemp
 	ch <- c.metrics.humidity
 	ch <- c.metrics.heating
+	ch <- c.metrics.cooling
+	ch <- c.metrics.fan
+	ch <- c.metrics.eco
 }
 
 // Collect implements the prometheus.Collector interface.
@@ -141,7 +154,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.metrics.ambientTemp, prometheus.GaugeValue, therm.AmbientTemp, labels...)
 		ch <- prometheus.MustNewConstMetric(c.metrics.setpointTemp, prometheus.GaugeValue, therm.SetpointTemp, labels...)
 		ch <- prometheus.MustNewConstMetric(c.metrics.humidity, prometheus.GaugeValue, therm.Humidity, labels...)
-		ch <- prometheus.MustNewConstMetric(c.metrics.heating, prometheus.GaugeValue, b2f(therm.Status == "HEATING"), labels...)
+		ch <- prometheus.MustNewConstMetric(c.metrics.heating, prometheus.GaugeValue, b2f(therm.Heating == "HEATING"), labels...)
+		ch <- prometheus.MustNewConstMetric(c.metrics.cooling, prometheus.GaugeValue, b2f(therm.Cooling == "COOLING"), labels...)
+		ch <- prometheus.MustNewConstMetric(c.metrics.fan, prometheus.GaugeValue, b2f(therm.Fan == "ON"), labels...)
+		ch <- prometheus.MustNewConstMetric(c.metrics.eco, prometheus.GaugeValue, b2f(therm.Eco == "MANUAL_ECO"), labels...)
 	}
 }
 
@@ -172,10 +188,13 @@ func (c *Collector) getNestReadings() (thermostats []*Thermostat, err error) {
 		thermostat := Thermostat{
 			ID:           device.Get("name").String(),
 			Label:        device.Get("traits.sdm\\.devices\\.traits\\.Info.customName").String(),
-			AmbientTemp:  device.Get("traits.sdm\\.devices\\.traits\\.Temperature.ambientTemperatureCelsius").Float(),
-			SetpointTemp: device.Get("traits.sdm\\.devices\\.traits\\.ThermostatTemperatureSetpoint.heatCelsius").Float(),
+			AmbientTemp:  Round(device.Get("traits.sdm\\.devices\\.traits\\.Temperature.ambientTemperatureCelsius").Float()*1.8+32, .5),
+			SetpointTemp: Round(device.Get("traits.sdm\\.devices\\.traits\\.ThermostatTemperatureSetpoint.heatCelsius").Float()*1.8+32, .5),
 			Humidity:     device.Get("traits.sdm\\.devices\\.traits\\.Humidity.ambientHumidityPercent").Float(),
-			Status:       device.Get("traits.sdm\\.devices\\.traits\\.ThermostatHvac.status").String(),
+			Heating:      device.Get("traits.sdm\\.devices\\.traits\\.ThermostatHvac.status").String(),
+			Cooling:      device.Get("traits.sdm\\.devices\\.traits\\.ThermostatHvac.status").String(),
+			Fan:          device.Get("traits.sdm\\.devices\\.traits\\.Fan.timerMode").String(),
+			Eco:          device.Get("traits.sdm\\.devices\\.traits\\.ThermostatEco.mode").String(),
 		}
 
 		thermostats = append(thermostats, &thermostat)
@@ -194,4 +213,8 @@ func b2f(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func Round(x, unit float64) float64 {
+	return math.Round(x/unit) * unit
 }
